@@ -9,7 +9,7 @@ import 'webidl.dart';
 
 typedef GLint64 = int;
 typedef GLuint64 = int;
-typedef Uint32List = JSAny?;
+typedef Uint32List = JSObject;
 
 @JS('WebGLQuery')
 @staticInterop

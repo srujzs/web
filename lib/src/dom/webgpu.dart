@@ -1300,7 +1300,7 @@ extension GPUBindingCommandsMixinExtension on GPUBindingCommandsMixin {
   external JSVoid setBindGroup(
     GPUIndex32 index,
     GPUBindGroup? bindGroup, [
-    JSAny? dynamicOffsetsOrDynamicOffsetsData,
+    JSObject dynamicOffsetsOrDynamicOffsetsData,
     GPUSize64 dynamicOffsetsDataStart,
     GPUSize32 dynamicOffsetsDataLength,
   ]);

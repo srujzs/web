@@ -8,6 +8,7 @@ import 'package:code_builder/code_builder.dart' as code;
 import 'package:path/path.dart' as p;
 
 import 'banned_names.dart';
+import 'js_types_least_common_supertypes.dart';
 import 'singletons.dart';
 import 'type_aliases.dart';
 import 'util.dart';
@@ -80,19 +81,61 @@ class _Library {
   }
 }
 
-String _typeRaw(idl.IDLType idlType) {
-  final String type;
+/// Set of all typedefs used for type union calculation.
+Map<String, idl.IDLType> _allTypedefs = {};
+
+/// Returns a record containing the Dart type for the given [idlType] and a bool
+/// indicating whether the type is nullable.
+(String, bool) _typeRaw(idl.IDLType idlType) {
+  // For union types, we take the possible union of all the types (`JSAny` if we
+  // can't find a union type) and nullabilities. While in general, we leave
+  // typedefs as is, in the case of union types, we desugar them to get a better
+  // union type.
   if (idlType.union.toDart) {
-    type = 'union';
-  } else if (idlType.generic.toDart.isNotEmpty) {
+    final types = (idlType.idlType as JSArray).toDart;
+    String? unionType;
+    var nullable = idlType.nullable.toDart;
+    for (final type in types) {
+      var rawType = _typeRaw(type as idl.IDLType);
+      if (_allTypedefs.containsKey(rawType.$1)) {
+        // Desugar the typedef.
+        rawType = _typeRaw(_allTypedefs[rawType.$1]!);
+      }
+      nullable = nullable || rawType.$2;
+      if (unionType == null) {
+        unionType = rawType.$1;
+      } else {
+        final newUnion =
+            jsTypesLeastCommonSupertypes[unionType]?[rawType.$1]?.first;
+        // If incompatible type, leave as `JSAny`.
+        if (newUnion != null) {
+          unionType = newUnion;
+        } else {
+          unionType = 'JSAny';
+          break;
+        }
+      }
+    }
+    return (unionType!, nullable);
+  }
+  final String type;
+  final nullable = idlType.nullable.toDart;
+  if (idlType.generic.toDart.isNotEmpty) {
+    // TODO(srujzs): Once we have a generic `JSArray` and `JSPromise`, we should
+    // add these type parameters in. We need to be careful, however, as we
+    // should only add the type parameter if the type is a subtype of `JSAny?`
+    // either because it is an interface or a typedef. We also need to make sure
+    // to convert type aliases that are Dart types back to JS types e.g.
+    // `String` should be `JSString`.
     type = idlType.generic.toDart;
   } else {
     type = (idlType.idlType as JSString).toDart;
   }
   if (typeAliases.containsKey(type)) {
-    return typeAliases[type]!;
+    return (typeAliases[type]!, nullable);
   } else {
-    return type;
+    // Either an interface or a typedef.
+    return (type, nullable);
   }
 }
 
@@ -102,18 +145,17 @@ class _Type {
 
   _Type._(this.type, this.isNullable);
 
-  factory _Type(idl.IDLType type) =>
-      _Type._(_typeRaw(type), type.nullable.toDart);
+  factory _Type(idl.IDLType type) {
+    final rawType = _typeRaw(type);
+    return _Type._(rawType.$1, rawType.$2);
+  }
 
   void update(idl.IDLType idlType) {
-    final thatType = _typeRaw(idlType);
+    final rawType = _typeRaw(idlType);
+    isNullable = isNullable || rawType.$2;
+    final thatType = rawType.$1;
     if (type != thatType) {
-      // TODO(joshualitt): In some cases we could probably find a better upper
-      // bound.
-      type = 'JSAny';
-    }
-    if (idlType.nullable.toDart) {
-      isNullable = true;
+      type = jsTypesLeastCommonSupertypes[type]?[thatType]?.first ?? 'JSAny';
     }
   }
 }
@@ -346,10 +388,12 @@ class Translator {
     }
   }
 
-  code.TypeDef _typedef(String name, String type, bool nullable) =>
-      code.TypeDef((b) => b
-        ..name = name
-        ..definition = _typeReference(type, isNullable: nullable));
+  code.TypeDef _typedef(String name, [(String, bool)? customType]) {
+    final type = customType ?? _typeRaw(_allTypedefs[name]!);
+    return code.TypeDef((b) => b
+      ..name = name
+      ..definition = _typeReference(type.$1, isNullable: type.$2));
+  }
 
   code.Method _topLevelGetter(String dartName, String getterName) =>
       code.Method((b) => b
@@ -399,9 +443,10 @@ class Translator {
   }
 
   code.TypeReference _idlTypeToTypeReference(idl.IDLType idlType,
-          {required bool isReturn}) =>
-      _typeReference(_typeRaw(idlType),
-          isNullable: idlType.nullable.toDart, isReturn: isReturn);
+      {required bool isReturn}) {
+    final type = _typeRaw(idlType);
+    return _typeReference(type.$1, isNullable: type.$2, isReturn: isReturn);
+  }
 
   code.TypeReference _typeToTypeReference(_Type type,
           {required bool isReturn}) =>
@@ -675,19 +720,18 @@ class Translator {
     ..comments.addAll(licenseHeader)
     ..body.addAll([
       for (final typedef in library.typedefs)
-        _typedef(typedef.name.toDart, _typeRaw(typedef.idlType),
-            typedef.idlType.nullable.toDart),
+        _typedef(typedef.name.toDart, _typeRaw(typedef.idlType)),
       // TODO(joshualitt): We should lower callbacks and callback interfaces to
       // a Dart function that takes a typed Dart function, and returns an
       // JSFunction.
       for (final callback in library.callbacks)
-        _typedef(callback.name.toDart, 'JSFunction', false),
+        _typedef(callback.name.toDart, ('JSFunction', false)),
       for (final callbackInterface in library.callbackInterfaces)
-        _typedef(callbackInterface.name.toDart, 'JSFunction', false),
+        _typedef(callbackInterface.name.toDart, ('JSFunction', false)),
       // TODO(joshualitt): Enums in the WebIDL are just strings, but we could
       // make them easier to work with on the Dart side.
       for (final enum_ in library.enums)
-        _typedef(enum_.name.toDart, 'String', false),
+        _typedef(enum_.name.toDart, ('String', false)),
       for (final interfacelike in library.interfacelikes)
         ..._interfacelike(interfacelike),
     ]));
@@ -709,6 +753,16 @@ class Translator {
       final target = _interfacelikes[include.target.toDart]!;
       final includes = _interfacelikes[include.includes.toDart]!;
       target.include(includes);
+    }
+
+    // Store all typedefs before we process libraries. This is necessary when we
+    // do the type calculation as we don't know whether a type is an interface
+    // or a typedef.
+    for (final entry in _libraries.entries) {
+      for (final typedef in entry.value.typedefs) {
+        assert(!_allTypedefs.containsKey(typedef.name.toDart));
+        _allTypedefs[typedef.name.toDart] = typedef.idlType;
+      }
     }
 
     // Translate each IDL library into a Dart library.

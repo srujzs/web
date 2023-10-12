@@ -23,8 +23,8 @@ typedef GLuint = int;
 typedef GLfloat = num;
 typedef GLclampf = num;
 typedef TexImageSource = JSAny?;
-typedef Float32List = JSAny?;
-typedef Int32List = JSAny?;
+typedef Float32List = JSObject;
+typedef Int32List = JSObject;
 typedef WebGLPowerPreference = String;
 
 @JS()

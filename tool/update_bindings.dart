@@ -1,6 +1,15 @@
+// Copyright (c) 2023, the Dart project authors.  Please see the AUTHORS file
+// for details. All rights reserved. Use of this source code is governed by a
+// BSD-style license that can be found in the LICENSE file.
+
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:analyzer/dart/analysis/analysis_context_collection.dart';
+import 'package:analyzer/dart/analysis/results.dart';
+import 'package:analyzer/dart/element/element.dart';
+import 'package:analyzer/dart/element/type.dart';
 import 'package:args/args.dart';
 import 'package:io/ansi.dart' as ansi;
 import 'package:io/io.dart';
@@ -33,6 +42,9 @@ $_usage''');
   } else {
     await _runProc('npm', ['install'], _bindingsGeneratorPath);
   }
+
+  // Compute least common supertypes to be used by translator.
+  await _generateLeastCommonSupertypes();
 
   if (argResult['compile'] as bool) {
     // Compile Dart to Javascript.
@@ -129,6 +141,113 @@ Future<void> _runProc(
   if (procExit != 0) {
     throw ProcessException(executable, arguments, 'Process failed', procExit);
   }
+}
+
+Future<void> _generateLeastCommonSupertypes() async {
+  // Use a file that uses `dart:js_interop` for analysis.
+  final contextCollection = AnalysisContextCollection(
+      includedPaths: [p.fromUri(Platform.script.resolve('../lib/web.dart'))]);
+  final dartJsInterop = await contextCollection.contexts.single.currentSession
+      .getLibraryByUri('dart:js_interop') as LibraryElementResult;
+  final definedNames = dartJsInterop.element.exportNamespace.definedNames;
+  final typeHierarchy = <String, Set<String>>{};
+  final jsTypes = <String>{};
+  for (final name in definedNames.keys) {
+    final element = definedNames[name];
+    if (element is TypeDefiningElement) {
+      void storeSupertypes(InterfaceElement element) {
+        bool isInJsTypes(InterfaceElement element) =>
+            // We only care about JS types for this calculation.
+            element.library.isInSdk && element.library.name == '_js_types';
+
+        if (!isInJsTypes(element)) return;
+        jsTypes.add(name);
+        final supertypes = <String>{};
+        final immediateSupertypes = <InterfaceType>[
+          if (element.supertype != null) element.supertype!,
+          ...element.interfaces,
+        ];
+        for (final supertype in immediateSupertypes) {
+          if (isInJsTypes(supertype.element)) {
+            supertypes.add(supertype.element.name);
+          }
+        }
+        typeHierarchy[name] = supertypes;
+      }
+
+      if (element is TypeAliasElement) {
+        final type = element.aliasedType;
+        if (type is InterfaceType) storeSupertypes(type.element);
+      } else if (element is InterfaceElement) {
+        storeSupertypes(element);
+      }
+    }
+  }
+  Set<String> computeLeastCommonSupertypes(String type1, String type2) {
+    Set<String> getAllSupertypes(String type) {
+      final supertypes = <String>{type};
+      final current = <String>{type};
+      while (current.isNotEmpty) {
+        final currentType = current.first;
+        current.remove(currentType);
+        final parents = typeHierarchy[currentType];
+        if (parents != null) {
+          current.addAll(parents);
+          supertypes.addAll(parents);
+        }
+      }
+      return supertypes;
+    }
+
+    final sharedSupertypes =
+        getAllSupertypes(type1).intersection(getAllSupertypes(type2));
+    // The least common supertypes are the supertypes that don't have any
+    // subtypes in the set of shared subtypes.
+    final supertypesWithNoSubtypes = <String>{};
+    for (final supertype in sharedSupertypes) {
+      if (!typeHierarchy.containsKey(supertype)) continue;
+      supertypesWithNoSubtypes.addAll(typeHierarchy[supertype]!);
+    }
+    return sharedSupertypes.difference(supertypesWithNoSubtypes);
+  }
+
+  // Sort to avoid potential non-determinism.
+  final leastCommonSupertypeMap = <String, Map<String, SplayTreeSet<String>>>{};
+  for (final type1 in jsTypes) {
+    for (final type2 in jsTypes) {
+      final leastCommonSupertypes = SplayTreeSet<String>.from(
+          computeLeastCommonSupertypes(type1, type2)
+              .map((type) => "'$type'")
+              .toSet());
+      // TODO(srujzs): While this code should work for a DAG type hierarchy, JS
+      // types are currently a tree, so it's untested for DAGs. For now, assert
+      // that it is a tree so that we take a look at this code if we change it
+      // to be a DAG.
+      assert(leastCommonSupertypes.length == 1);
+      // Add quotes for easier stringifying.
+      leastCommonSupertypeMap.putIfAbsent("'$type1'", () => {})["'$type2'"] =
+          leastCommonSupertypes;
+    }
+  }
+
+  final jsTypesLeastCommonSupertypes = '''
+  // Copyright (c) 2023, the Dart project authors.  Please see the AUTHORS file
+  // for details. All rights reserved. Use of this source code is governed by a
+  // BSD-style license that can be found in the LICENSE file.
+
+  // Updated by $_thisScript. Do not modify by hand.
+
+  const Map<String, Map<String, Set<String>>> jsTypesLeastCommonSupertypes = $leastCommonSupertypeMap;
+  ''';
+  final jsTypesLeastCommonSupertypesPath =
+      p.join(_bindingsGeneratorPath, 'js_types_least_common_supertypes.dart');
+  await File(jsTypesLeastCommonSupertypesPath)
+      .writeAsString(jsTypesLeastCommonSupertypes);
+  await _runProc(
+    Platform.executable,
+    ['format', jsTypesLeastCommonSupertypesPath],
+    _bindingsGeneratorPath,
+  );
 }
 
 final _usage = '''

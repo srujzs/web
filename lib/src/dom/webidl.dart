@@ -4,8 +4,8 @@
 
 import 'dart:js_interop';
 
-typedef ArrayBufferView = JSAny?;
-typedef BufferSource = JSAny?;
+typedef ArrayBufferView = JSObject;
+typedef BufferSource = JSObject;
 typedef AllowSharedBufferSource = JSAny?;
 typedef VoidFunction = JSFunction;
 

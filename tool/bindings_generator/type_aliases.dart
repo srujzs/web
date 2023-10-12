@@ -4,7 +4,6 @@
 
 const typeAliases = <String, String>{
   'any': 'JSAny',
-  'union': 'JSAny',
   'record': 'JSAny',
   'object': 'JSObject',
   'Promise': 'JSPromise',
@@ -24,6 +23,9 @@ const typeAliases = <String, String>{
   'Uint8ClampedArray': 'JSUint8ClampedArray',
   'Float32Array': 'JSFloat32Array',
   'Float64Array': 'JSFloat64Array',
+  // TODO(srujzs): Change these aliases if we add these two as JS types.
+  'BigInt64Array': 'JSTypedArray',
+  'BigUint64Array': 'JSTypedArray',
 
   // Array aliases.
   'sequence': 'JSArray',
